@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Model wrapper for ZhipuAI models"""
 from abc import ABC
+import time
 from typing import Union, Any, List, Sequence, Optional, Generator
 
 from loguru import logger
@@ -84,30 +85,29 @@ class ZhipuAIChatWrapper(ZhipuAIWrapperBase):
     Response:
         - From https://maas.aminer.cn/dev/api#glm-4
 
-        .. code-block:: json
-
-            {
-                "created": 1703487403,
-                "id": "8239375684858666781",
-                "model": "glm-4",
-                "request_id": "8239375684858666781",
-                "choices": [
-                    {
-                        "finish_reason": "stop",
-                        "index": 0,
-                        "message": {
-                            "content": "Drawing blueprints with ...",
-                            "role": "assistant"
-                        }
+        ```json
+        {
+            "created": 1703487403,
+            "id": "8239375684858666781",
+            "model": "glm-4",
+            "request_id": "8239375684858666781",
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "index": 0,
+                    "message": {
+                        "content": "Drawing blueprints with ...",
+                        "role": "assistant"
                     }
-                ],
-                "usage": {
-                    "completion_tokens": 217,
-                    "prompt_tokens": 31,
-                    "total_tokens": 248
                 }
+            ],
+            "usage": {
+                "completion_tokens": 217,
+                "prompt_tokens": 31,
+                "total_tokens": 248
             }
-
+        }
+        ```
     """
 
     model_type: str = "zhipuai_chat"
@@ -222,7 +222,43 @@ class ZhipuAIChatWrapper(ZhipuAIWrapperBase):
             },
         )
 
-        response = self.client.chat.completions.create(**kwargs)
+        #response = self.client.chat.completions.create(**kwargs)
+        count = 0
+        modified_messages_attempted = False # 添加一个标志，记录是否已经尝试过修改 messages
+        while True:  # 添加无限重试循环
+            count += 1
+            try:
+                response = self.client.chat.completions.create(**kwargs)
+                break  # 如果请求成功，则跳出循环
+            except Exception as e:
+                error_message = str(e)
+                if ("不安全" in error_message or "敏感" in error_message) and not modified_messages_attempted: # 检查报错信息是否包含 "不安全" 或 "敏感" 并且尚未尝试修改
+                    logger.warning(f"请求 OpenAI API 失败: {e}，错误信息包含 '不安全' 或 '敏感'，尝试替换 'China' 和 'Chinese' 并重试。")
+
+                    # step2.5: Modify messages to replace "China" and "Chinese"
+                    modified_messages = []
+                    original_messages = kwargs["messages"] # 获取原始的 messages
+                    for msg in original_messages:
+                        if "content" in msg:
+                            content = msg["content"]
+                            content = content.replace("China", "some country")
+                            content = content.replace("Chinese", "some country's")
+                            modified_messages.append({"role": msg["role"], "content": content}) # 保持 role 和 content 的结构
+                        else:
+                            modified_messages.append(msg) # 如果 message 结构不包含 content，则保持原样
+
+                    kwargs["messages"] = modified_messages # 更新 kwargs 中的 messages
+                    modified_messages_attempted = True # 设置标志为已尝试修改
+                    time.sleep(3*count) # 重试前等待
+                    continue # 继续下一次循环，使用修改后的 messages 重试
+
+                elif "不安全" in error_message or "敏感" in error_message:
+                    logger.warning(f"请求 OpenAI API 失败: {e}，错误信息仍然包含 '不安全' 或 '敏感'，即使替换 'China' 和 'Chinese' 后仍然敏感，请检查 messages 内容。")
+                    break # 即使替换后仍然敏感，也跳出循环，避免无限循环
+
+                else:
+                    logger.warning(f"请求 OpenAI API 失败: {e}，正在重试...")
+                    time.sleep(3*count)  # 添加动态重试间隔，避免过于频繁的请求
 
         if stream:
 
@@ -327,12 +363,10 @@ class ZhipuAIChatWrapper(ZhipuAIWrapperBase):
             # prompt1
             [
                 {
-                    "role": "system",
-                    "content": "You're a helpful assistant"
-                },
-                {
                     "role": "user",
                     "content": (
+                        "You're a helpful assistant\\n"
+                        "\\n"
                         "## Conversation History\\n"
                         "Bob: Hi, how can I help you?\\n"
                         "user: What's the date today?"
@@ -372,31 +406,30 @@ class ZhipuAIEmbeddingWrapper(ZhipuAIWrapperBase):
 
     Example Response:
 
-        .. code-block:: json
-
+    ```json
+    {
+        "model": "embedding-2",
+        "data": [
             {
-                "model": "embedding-2",
-                "data": [
-                    {
-                        "embedding": [ (a total of 1024 elements)
-                            -0.02675454691052437,
-                            0.019060475751757622,
-                            ......
-                            -0.005519774276763201,
-                            0.014949671924114227
-                        ],
-                        "index": 0,
-                        "object": "embedding"
-                    }
+                "embedding": [ (a total of 1024 elements)
+                    -0.02675454691052437,
+                    0.019060475751757622,
+                    ......
+                    -0.005519774276763201,
+                    0.014949671924114227
                 ],
-                "object": "list",
-                "usage": {
-                    "completion_tokens": 0,
-                    "prompt_tokens": 4,
-                    "total_tokens": 4
-                }
+                "index": 0,
+                "object": "embedding"
             }
-
+        ],
+        "object": "list",
+        "usage": {
+            "completion_tokens": 0,
+            "prompt_tokens": 4,
+            "total_tokens": 4
+        }
+    }
+    ```
     """
 
     model_type: str = "zhipuai_embedding"
