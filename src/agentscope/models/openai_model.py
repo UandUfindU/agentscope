@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Model wrapper for OpenAI models"""
 from abc import ABC
+import time
 from typing import (
     Union,
     Any,
@@ -9,6 +10,7 @@ from typing import (
     Dict,
     Optional,
     Generator,
+    get_args,
 )
 
 from loguru import logger
@@ -31,32 +33,31 @@ class OpenAIWrapperBase(ModelWrapperBase, ABC):
     Response:
         - From https://platform.openai.com/docs/api-reference/chat/create
 
-        .. code-block:: json
-
-            {
-                "id": "chatcmpl-123",
-                "object": "chat.completion",
-                "created": 1677652288,
-                "model": "gpt-4o-mini",
-                "system_fingerprint": "fp_44709d6fcb",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": "Hello there, how may I assist you?",
-                        },
-                        "logprobs": null,
-                        "finish_reason": "stop"
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": 9,
-                    "completion_tokens": 12,
-                    "total_tokens": 21
+        ```json
+        {
+            "id": "chatcmpl-123",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": "gpt-4o-mini",
+            "system_fingerprint": "fp_44709d6fcb",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Hello there, how may I assist you today?",
+                    },
+                    "logprobs": null,
+                    "finish_reason": "stop"
                 }
+            ],
+            "usage": {
+                "prompt_tokens": 9,
+                "completion_tokens": 12,
+                "total_tokens": 21
             }
-
+        }
+        ```
     """
 
     def __init__(
@@ -67,6 +68,7 @@ class OpenAIWrapperBase(ModelWrapperBase, ABC):
         organization: str = None,
         client_args: dict = None,
         generate_args: dict = None,
+        api_url: str = "https://api.openai.com/v1",
         **kwargs: Any,
     ) -> None:
         """Initialize the openai client.
@@ -107,6 +109,7 @@ class OpenAIWrapperBase(ModelWrapperBase, ABC):
 
         self.client = openai.OpenAI(
             api_key=api_key,
+            base_url = api_url,  # Set the base URL
             organization=organization,
             **(client_args or {}),
         )
@@ -135,6 +138,8 @@ class OpenAIChatWrapper(OpenAIWrapperBase):
     """The model wrapper for OpenAI's chat API."""
 
     model_type: str = "openai_chat"
+
+    deprecated_model_type: str = "openai"
 
     substrings_in_vision_models_names = ["gpt-4-turbo", "vision", "gpt-4o"]
     """The substrings in the model names of vision models."""
@@ -184,11 +189,12 @@ class OpenAIChatWrapper(OpenAIWrapperBase):
 
         self.stream = stream
 
+
     def __call__(
-        self,
-        messages: list[dict],
-        stream: Optional[bool] = None,
-        **kwargs: Any,
+    self,
+    messages: list[dict],
+    stream: Optional[bool] = None,
+    **kwargs: Any,
     ) -> ModelResponse:
         """Processes a list of messages to construct a payload for the OpenAI
         API call. It then makes a request to the OpenAI API and returns the
@@ -262,7 +268,15 @@ class OpenAIChatWrapper(OpenAIWrapperBase):
         if stream:
             kwargs["stream_options"] = {"include_usage": True}
 
-        response = self.client.chat.completions.create(**kwargs)
+        count = 0
+        while True:  # 添加无限重试循环
+            count += 1
+            try:
+                response = self.client.chat.completions.create(**kwargs)
+                break  # 如果请求成功，则跳出循环
+            except Exception as e:
+                logger.warning(f"请求 OpenAI API 失败: {e}，正在重试...")
+                time.sleep(3*count)  # 添加动态重试间隔，避免过于频繁的请求
 
         if stream:
 
@@ -472,9 +486,7 @@ class OpenAIChatWrapper(OpenAIWrapperBase):
         *args: Union[Msg, Sequence[Msg]],
     ) -> List[dict]:
         """Format the input string and dictionary into the format that
-        OpenAI Chat API required. If you're using a OpenAI-compatible model
-        without a prefix "gpt-" in its name, the format method will
-        automatically format the input messages into the required format.
+        OpenAI Chat API required.
 
         Args:
             args (`Union[Msg, Sequence[Msg]]`):
@@ -487,9 +499,17 @@ class OpenAIChatWrapper(OpenAIWrapperBase):
                 The formatted messages in the format that OpenAI Chat API
                 required.
         """
+        # Check if the OpenAI library is installed
+        try:
+            import openai
+        except ImportError as e:
+            raise ImportError(
+                "Cannot find openai package, please install it by "
+                "`pip install openai`",
+            ) from e
 
         # Format messages according to the model name
-        if self.model_name.startswith("gpt-"):
+        if self.model_name in get_args(openai.types.ChatModel):
             return OpenAIChatWrapper.static_format(
                 *args,
                 model_name=self.model_name,
@@ -505,20 +525,19 @@ class OpenAIDALLEWrapper(OpenAIWrapperBase):
     Response:
         - Refer to https://platform.openai.com/docs/api-reference/images/create
 
-        .. code-block:: json
-
-            {
-                "created": 1589478378,
-                "data": [
-                    {
-                        "url": "https://..."
-                    },
-                    {
-                        "url": "https://..."
-                    }
-                ]
-            }
-
+        ```json
+        {
+            "created": 1589478378,
+            "data": [
+                {
+                    "url": "https://..."
+                },
+                {
+                    "url": "https://..."
+                }
+            ]
+        }
+        ```
     """
 
     model_type: str = "openai_dall_e"
@@ -633,29 +652,28 @@ class OpenAIEmbeddingWrapper(OpenAIWrapperBase):
         - Refer to
         https://platform.openai.com/docs/api-reference/embeddings/create
 
-        .. code-block:: json
-
-            {
-                "object": "list",
-                "data": [
-                    {
-                        "object": "embedding",
-                        "embedding": [
-                            0.0023064255,
-                            -0.009327292,
-                            .... (1536 floats total for ada-002)
-                            -0.0028842222,
-                        ],
-                        "index": 0
-                    }
-                ],
-                "model": "text-embedding-ada-002",
-                "usage": {
-                    "prompt_tokens": 8,
-                    "total_tokens": 8
+        ```json
+        {
+            "object": "list",
+            "data": [
+                {
+                    "object": "embedding",
+                    "embedding": [
+                        0.0023064255,
+                        -0.009327292,
+                        .... (1536 floats total for ada-002)
+                        -0.0028842222,
+                    ],
+                    "index": 0
                 }
+            ],
+            "model": "text-embedding-ada-002",
+            "usage": {
+                "prompt_tokens": 8,
+                "total_tokens": 8
             }
-
+        }
+        ```
     """
 
     model_type: str = "openai_embedding"
